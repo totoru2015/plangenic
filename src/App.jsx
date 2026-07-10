@@ -5,7 +5,7 @@ import {
   Rocket, Gauge, Landmark, Heart, Building2, TrendingUp, Package,
   Megaphone, Settings, DollarSign, Paperclip, BarChart3, Trophy, Map,
   Download, FileType, Upload, Activity, RefreshCw, CheckCircle, XCircle, AlertTriangle,
-  LogIn, LogOut, User, Save, BookOpen
+  LogIn, LogOut, User, Save, BookOpen, Presentation
 } from "lucide-react";
 import { supabase } from "./supabase";
 import AuthModal from "./AuthModal";
@@ -706,6 +706,16 @@ p{margin:5px 0;font-size:13.5px} .meta{color:#6b6f7a;font-size:12px;margin-botto
     finally { setExporting(false); }
   }
 
+  async function exportDeck(plan, planType, org) {
+    setExporting(true); setExportMsg("");
+    try {
+      const { exportPitchDeck } = await import("./pitchDeck");
+      await exportPitchDeck(plan, planType, org);
+      setExportMsg("✓ Pitch deck downloaded — open it in PowerPoint to present or edit.");
+    } catch (e) { setExportMsg("Couldn't create the pitch deck: " + (e.message || e)); }
+    finally { setExporting(false); }
+  }
+
   const activeSteps = docType === "strategic" ? STRAT_STEPS : docType === "healthcheck" ? HEALTH_STEPS : BIZ_STEPS;
 
   // ── Login gate — pilot access only ──
@@ -1155,6 +1165,7 @@ p{margin:5px 0;font-size:13.5px} .meta{color:#6b6f7a;font-size:12px;margin-botto
                   </button>
                   <button onClick={() => exportPDF(plan, planType, f.org)} disabled={exporting} style={{ cursor: exporting ? "wait" : "pointer", border: "none", background: C.accent, color: "#fff", borderRadius: 8, padding: "10px 15px", fontSize: 13.5, fontWeight: 600, display: "flex", alignItems: "center", gap: 7 }}><Download size={15} /> PDF</button>
                   <button onClick={() => exportDOCX(plan, planType, f.org)} disabled={exporting} style={{ cursor: exporting ? "wait" : "pointer", border: "none", background: C.paper, color: C.ink, borderRadius: 8, padding: "10px 15px", fontSize: 13.5, fontWeight: 600, display: "flex", alignItems: "center", gap: 7 }}><FileType size={15} /> Word (.doc)</button>
+                  <button onClick={() => exportDeck(plan, planType, f.org)} disabled={exporting} style={{ cursor: exporting ? "wait" : "pointer", border: "none", background: `linear-gradient(145deg, ${C.accent2}, ${C.accent})`, color: "#fff", borderRadius: 8, padding: "10px 15px", fontSize: 13.5, fontWeight: 600, display: "flex", alignItems: "center", gap: 7, boxShadow: "0 6px 14px -4px rgba(37,99,235,0.5)" }}><Presentation size={15} /> Pitch deck</button>
                 </div>
               </section>
             )}
