@@ -163,13 +163,13 @@ const HEALTH_STEPS = [
 const DAILY_LIMIT = 5;
 function getUsage() {
   const today = new Date().toDateString();
-  const stored = JSON.parse(localStorage.getItem("strataplan_usage") || "{}");
+  const stored = JSON.parse(localStorage.getItem("plangenic_usage") || "{}");
   if (stored.date !== today) return { date: today, count: 0 };
   return stored;
 }
 function incrementUsage() {
   const usage = getUsage();
-  localStorage.setItem("strataplan_usage", JSON.stringify({ date: usage.date, count: usage.count + 1 }));
+  localStorage.setItem("plangenic_usage", JSON.stringify({ date: usage.date, count: usage.count + 1 }));
 }
 function getRemainingGenerations() {
   return Math.max(0, DAILY_LIMIT - getUsage().count);
@@ -742,7 +742,7 @@ p{margin:5px 0;font-size:13.5px} .meta{color:#6b6f7a;font-size:12px;margin-botto
             <div style={{ width: 38, height: 38, borderRadius: 11, display: "flex", alignItems: "center", justifyContent: "center", background: `linear-gradient(145deg, ${C.accent2}, ${C.accent})`, boxShadow: "0 6px 18px -4px rgba(37,99,235,0.7)" }}>
               <Compass size={20} color="#fff" />
             </div>
-            <span style={{ fontFamily: "'Fraunces',serif", fontWeight: 600, fontSize: 26, color: "#fff", letterSpacing: "-.01em" }}>Strataplan</span>
+            <span style={{ fontFamily: "'Fraunces',serif", fontWeight: 600, fontSize: 26, color: "#fff", letterSpacing: "-.01em" }}>Plangenic</span>
           </div>
           <button onClick={() => setShowAuth(true)} style={{ cursor: "pointer", border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.06)", color: "#c9d8f0", borderRadius: 9, padding: "9px 22px", fontSize: 14, fontWeight: 600, backdropFilter: "blur(8px)" }}>
             Log in
@@ -915,7 +915,7 @@ p{margin:5px 0;font-size:13.5px} .meta{color:#6b6f7a;font-size:12px;margin-botto
               </div>
             </div>
           </div>
-          <h1 style={{ fontFamily: "'Fraunces',serif", fontWeight: 600, fontSize: 38, lineHeight: 1.05, margin: "14px 0 4px", color: "#fff", position: "relative" }}>Strataplan</h1>
+          <h1 style={{ fontFamily: "'Fraunces',serif", fontWeight: 600, fontSize: 38, lineHeight: 1.05, margin: "14px 0 4px", color: "#fff", position: "relative" }}>Plangenic</h1>
           <p style={{ color: "#b9c6e0", fontSize: 15, margin: 0, position: "relative" }}>Board-ready strategic plans and full business plans — drafted in minutes.</p>
         </header>
 

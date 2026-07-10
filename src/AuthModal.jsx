@@ -191,7 +191,7 @@ export default function AuthModal({ onClose, onAuthSuccess }) {
           }}>
             <Compass size={17} color="#fff" />
           </div>
-          <span style={{ fontFamily: "'Fraunces',serif", fontWeight: 600, fontSize: 22, color: C.ink }}>Strataplan</span>
+          <span style={{ fontFamily: "'Fraunces',serif", fontWeight: 600, fontSize: 22, color: C.ink }}>Plangenic</span>
         </div>
 
         {/* Step indicator for signup */}
@@ -376,7 +376,7 @@ export default function AuthModal({ onClose, onAuthSuccess }) {
               <label style={{ display: "flex", alignItems: "flex-start", gap: 10, cursor: "pointer", padding: "12px 14px", border: `1px solid ${declarationsAgreed ? C.accent2 : C.line}`, borderRadius: 9, background: declarationsAgreed ? "#eef8ff" : C.paper }}>
                 <input type="checkbox" checked={declarationsAgreed} onChange={(e) => setDeclarationsAgreed(e.target.checked)} style={{ accentColor: C.accent2, width: 16, height: 16, flexShrink: 0, marginTop: 2 }} />
                 <span style={{ fontSize: 13.5, color: C.ink, lineHeight: 1.55 }}>
-                  I declare that the qualifications and memberships I have selected above are true and correct. I understand that Strataplan reserves the right to verify these details and revoke consultant access if the information provided is found to be false or misleading.
+                  I declare that the qualifications and memberships I have selected above are true and correct. I understand that Plangenic reserves the right to verify these details and revoke consultant access if the information provided is found to be false or misleading.
                 </span>
               </label>
             </div>
