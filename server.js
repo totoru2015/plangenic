@@ -151,6 +151,51 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // Live market data — web search via Tavily (free tier). Safe fallback: if no
+  // TAVILY_API_KEY is set, returns { results: [] } and the app uses AI knowledge only.
+  if (req.method === "POST" && req.url === "/api/market") {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", async () => {
+      try {
+        const accessError = await checkPilotAccess(req);
+        if (accessError) { res.writeHead(403, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: accessError })); return; }
+
+        const tavilyKey = process.env.TAVILY_API_KEY;
+        if (!tavilyKey) { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ results: [], live: false })); return; }
+
+        const { query } = JSON.parse(body);
+        if (!query) { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Missing query" })); return; }
+
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 20000);
+        let r;
+        try {
+          r = await fetch("https://api.tavily.com/search", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ api_key: tavilyKey, query, search_depth: "basic", max_results: 5, include_answer: true }),
+            signal: controller.signal,
+          });
+        } catch (e) {
+          clearTimeout(timer);
+          // Fail soft — never block plan generation on a market-data hiccup
+          res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ results: [], live: false })); return;
+        }
+        clearTimeout(timer);
+        if (!r.ok) { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ results: [], live: false })); return; }
+        const data = await r.json();
+        const results = (data.results || []).map((x) => ({ title: x.title, url: x.url, content: x.content }));
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ answer: data.answer || "", results, live: true }));
+      } catch (e) {
+        // Any failure → soft empty result, generation continues normally
+        res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ results: [], live: false }));
+      }
+    });
+    return;
+  }
+
   res.writeHead(404);
   res.end();
 });

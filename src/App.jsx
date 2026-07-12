@@ -5,10 +5,12 @@ import {
   Rocket, Gauge, Landmark, Heart, Building2, TrendingUp, Package,
   Megaphone, Settings, DollarSign, Paperclip, BarChart3, Trophy, Map,
   Download, FileType, Upload, Activity, RefreshCw, CheckCircle, XCircle, AlertTriangle,
-  LogIn, LogOut, User, Save, BookOpen, Presentation
+  LogIn, LogOut, User, Save, BookOpen, Presentation, Calculator
 } from "lucide-react";
 import { supabase } from "./supabase";
 import AuthModal from "./AuthModal";
+import { financialAssumptionsPrompt, computeStatements, formatMoney, FINANCIAL_YEARS } from "./financials";
+import { TEMPLATES, TEMPLATE_CATEGORIES, templateYear } from "./templates";
 
 const FONTS = `
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Hanken+Grotesk:wght@300;400;500;600;700&display=swap');
@@ -214,6 +216,26 @@ async function readFileAsText(file) {
 const API_URL = "/api/generate";
 let callCounter = 0;
 
+// Live market data — returns "" if not configured (safe fallback), else a text block to inject
+async function fetchMarketData(query) {
+  try {
+    const token = (await supabase.auth.getSession()).data?.session?.access_token;
+    const res = await fetch("/api/market", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify({ query }),
+    });
+    if (!res.ok) return { block: "", sources: [] };
+    const data = await res.json();
+    if (!data.live || (!data.answer && (!data.results || !data.results.length))) return { block: "", sources: [] };
+    const snippets = (data.results || []).slice(0, 5).map((r) => `- ${r.title}: ${String(r.content || "").slice(0, 300)} (${r.url})`).join("\n");
+    const block = `\n\nCURRENT MARKET DATA (from live web search — use these up-to-date figures/trends and cite where relevant):\n${data.answer ? "Summary: " + data.answer + "\n" : ""}${snippets}`;
+    return { block, sources: (data.results || []).map((r) => ({ title: r.title, url: r.url })) };
+  } catch {
+    return { block: "", sources: [] };
+  }
+}
+
 async function callClaude(system, userContent, maxTokens = 8000) {
   const callId = ++callCounter;
   const startedAt = Date.now();
@@ -343,6 +365,11 @@ export default function App() {
   const [saveMsg, setSaveMsg] = useState("");
   const [saving, setSaving] = useState(false);
 
+  // Shared-plan view (someone opened a ?share=<token> link)
+  const [shareToken] = useState(() => {
+    try { return new URLSearchParams(window.location.search).get("share"); } catch { return null; }
+  });
+
   async function loadProfile(userId) {
     const { data } = await supabase.from("profiles").select("*").eq("id", userId).single();
     if (data) setUserProfile(data);
@@ -376,21 +403,66 @@ export default function App() {
     if (!plan) return;
     setSaving(true); setSaveMsg("");
     const title = `${f.org || "Untitled"} — ${planType === "strategic" ? "Strategic Plan" : "Business Plan"}`;
-    const { error } = await supabase.from("plans").insert({
+    const { data, error } = await supabase.from("plans").insert({
       user_id: user.id,
       title,
       doc_type: planType,
       content: plan,
-    });
+      tracking,
+    }).select("id").single();
     setSaving(false);
     if (error) { setSaveMsg("❌ Could not save — " + error.message); }
-    else { setSaveMsg("✓ Plan saved to your account."); setTimeout(() => setSaveMsg(""), 4000); }
+    else { if (data?.id) setCurrentPlanId(data.id); setSaveMsg("✓ Plan saved to your account."); setTimeout(() => setSaveMsg(""), 4000); }
+  }
+
+  // Saved plans library
+  const [showMyPlans, setShowMyPlans] = useState(false);
+  const [myPlans, setMyPlans] = useState([]);
+  const [plansLoading, setPlansLoading] = useState(false);
+  const [plansError, setPlansError] = useState("");
+
+  async function openMyPlans() {
+    if (!user) { setShowAuth(true); return; }
+    setShowMyPlans(true); setPlansLoading(true); setPlansError("");
+    const { data, error } = await supabase
+      .from("plans")
+      .select("id, title, doc_type, created_at")
+      .order("created_at", { ascending: false });
+    setPlansLoading(false);
+    if (error) setPlansError("Couldn't load your plans — " + error.message);
+    else setMyPlans(data || []);
+  }
+
+  async function reopenPlan(id) {
+    setPlansLoading(true); setPlansError("");
+    const { data, error } = await supabase.from("plans").select("*").eq("id", id).single();
+    setPlansLoading(false);
+    if (error || !data) { setPlansError("Couldn't open that plan."); return; }
+    setPlanType(data.doc_type);
+    setPlan(data.content);
+    setDocType(data.doc_type === "strategic" ? "strategic" : "business");
+    setF((p) => ({ ...p, org: (data.title || "").split(" — ")[0] || p.org }));
+    setFinModel(null); setVersions({}); setHealthResult(null);
+    setCurrentPlanId(data.id); setTracking(data.tracking || {});
+    setShowMyPlans(false);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  async function deleteSavedPlan(id) {
+    const { error } = await supabase.from("plans").delete().eq("id", id);
+    if (!error) setMyPlans((p) => p.filter((x) => x.id !== id));
   }
 
   const [docType, setDocType] = useState("strategic");
   const [role, setRole] = useState("owner");
   const [f, setF] = useState({ org: "", industry: "", stage: STAGES[1], goals: "", objectives: "", horizon: HORIZONS[2], constraints: "", includeCultural: false, compliance: [], auStates: [], jurisdiction: "" });
   const set = (k) => (e) => setF((p) => ({ ...p, [k]: e.target.value }));
+  function applyTemplate(t) {
+    setDocType(t.docType);
+    setF((p) => ({ ...p, org: t.org, industry: t.industry, stage: t.stage, goals: t.goals, objectives: t.objectives, horizon: t.horizon, constraints: t.constraints }));
+    setPlan(null); setHealthResult(null); setError(""); setGenErr("");
+    setShowTemplates(false);
+  }
   const toggleCompliance = (level) => setF((p) => ({ ...p, compliance: p.compliance.includes(level) ? p.compliance.filter((x) => x !== level) : [...p.compliance, level] }));
   const toggleAuState = (s) => setF((p) => ({ ...p, auStates: p.auStates.includes(s) ? p.auStates.filter((x) => x !== s) : [...p.auStates, s] }));
 
@@ -431,6 +503,29 @@ export default function App() {
 
   const [exporting, setExporting] = useState(false);
   const [exportMsg, setExportMsg] = useState("");
+
+  // Financial model (Stage 1: AI-generated three-statement model)
+  const [finModel, setFinModel] = useState(null);
+  const [finLoading, setFinLoading] = useState(false);
+  const [finError, setFinError] = useState("");
+
+  // Templates library
+  const [showTemplates, setShowTemplates] = useState(false);
+
+  // Live market data sources (populated during generation if configured)
+  const [marketSources, setMarketSources] = useState([]);
+
+  // Execution tracking (status per KPI / milestone / goal, persisted on the saved plan)
+  const [currentPlanId, setCurrentPlanId] = useState(null);
+  const [tracking, setTracking] = useState({});
+
+  async function setItemStatus(key, status) {
+    const next = { ...tracking, [key]: status };
+    setTracking(next);
+    if (currentPlanId) {
+      await supabase.from("plans").update({ tracking: next }).eq("id", currentPlanId);
+    }
+  }
 
   // Health check state
   const [uploadedFile, setUploadedFile] = useState(null);
@@ -485,7 +580,7 @@ Compliance focus: ${f.compliance.length ? f.compliance.map((c) => c === "local" 
     if (containsMalicious(allInputs)) { setError("Invalid input detected. Please remove any HTML or script content from your entries and try again."); return; }
     if (getRemainingGenerations() <= 0) { setError("You've reached today's limit of 5 plans. Come back tomorrow to generate more."); return; }
     incrementUsage();
-    setError(""); setGenErr(""); setLoading(true); setPlan(null); setPlanFw([]); setFwReasons({}); setFwRationale(""); setFwData({}); setFwOpen({}); setVersions({}); setSteps({});
+    setError(""); setGenErr(""); setLoading(true); setPlan(null); setPlanFw([]); setFwReasons({}); setFwRationale(""); setFwData({}); setFwOpen({}); setVersions({}); setSteps({}); setFinModel(null); setFinError(""); setCurrentPlanId(null); setTracking({}); setMarketSources([]);
     setPlanType(docType);
     if (docType === "strategic") await generateStrategic(); else await generateBusiness();
     setLoading(false);
@@ -508,7 +603,9 @@ Compliance focus: ${f.compliance.length ? f.compliance.map((c) => c === "local" 
       setFwRationale(fnd.frameworkRationale || "");
     }
 
-    const env = await runStep("environment", `Produce an environmental scan.\n\n${ctx()}\n\nReturn ONLY JSON:\n{ "environmentalScan":[ {"area":"Macro (PESTLE)","insights":["..."]}, {"area":"Industry & competition","insights":["..."]}, {"area":"Market & customers","insights":["..."]}, {"area":"Internal capabilities","insights":["..."]} ] }\n2-4 insights per area, specific to them. Only cite statistics or trends grounded in real government, regulatory, academic or reputable industry sources. If a figure is an estimate, flag it as such. Do not invent data.`);
+    const envMkt = await fetchMarketData(`${f.industry || f.org} industry market size trends outlook ${new Date().getFullYear()}`);
+    if (envMkt.sources.length) setMarketSources(envMkt.sources);
+    const env = await runStep("environment", `Produce an environmental scan.\n\n${ctx()}${envMkt.block}\n\nReturn ONLY JSON:\n{ "environmentalScan":[ {"area":"Macro (PESTLE)","insights":["..."]}, {"area":"Industry & competition","insights":["..."]}, {"area":"Market & customers","insights":["..."]}, {"area":"Internal capabilities","insights":["..."]} ] }\n2-4 insights per area, specific to them. Only cite statistics or trends grounded in real government, regulatory, academic or reputable industry sources. If a figure is an estimate, flag it as such. Do not invent data.`);
     if (env) { acc = { ...acc, ...env }; setPlan({ ...acc }); }
 
     const pl = await runStep("plan", `Define goals, objectives and initiatives.\n\n${ctx()}\nPriorities: ${JSON.stringify(acc.strategicPriorities || [])}\n\nReturn ONLY JSON:\n{ "goals":[{"goal":"...","objectives":["..."]}], "initiatives":[{"initiative":"...","linkedGoal":"...","owner":"function/role","timeframe":"e.g. Q1-Q2 Yr1","dependencies":"key dependencies or likely delays"}] }\n3-5 goals; 4-8 initiatives. Tailor timeframes to the ${f.horizon} horizon.`);
@@ -541,7 +638,9 @@ Compliance focus: ${f.compliance.length ? f.compliance.map((c) => c === "local" 
     const o = await runStep("boverview", `Create the opening of a business plan.\n\n${ctx()}\n\nReturn ONLY JSON:\n{ "tagline":"short evocative tagline", "preparedFor":"likely audience e.g. Prospective investors", "executiveSummary":"4-6 sentences", "businessOverview":{"description":"what the business does","mission":"one sentence","legalStructure":"suggest a sensible structure if unknown","stage":"...","location":"infer or 'to be confirmed'"} }`);
     if (o) { acc = { ...acc, ...o }; setPlan({ ...acc }); }
 
-    const m = await runStep("bmarket", `Write the market analysis for this business plan.\n\n${ctx()}\n\nReturn ONLY JSON:\n{ "marketAnalysis":{ "industryOverview":"2-3 sentences", "targetSegments":[{"segment":"...","need":"..."}], "marketSize":"TAM/SAM/SOM note, qualitative if figures unknown", "trends":["..."], "competitors":[{"name":"...","note":"how this business differs"}], "positioning":"one sentence" } }\nBe specific to the industry. Only use statistics and market data grounded in real published sources (government bodies, industry associations, academic research, established market research firms). Only name real verifiable competitors — do not invent competitor names. If market size figures are estimates, label them as such.`);
+    const bMkt = await fetchMarketData(`${f.industry || f.org} industry market size trends competitors ${new Date().getFullYear()}`);
+    if (bMkt.sources.length) setMarketSources(bMkt.sources);
+    const m = await runStep("bmarket", `Write the market analysis for this business plan.\n\n${ctx()}${bMkt.block}\n\nReturn ONLY JSON:\n{ "marketAnalysis":{ "industryOverview":"2-3 sentences", "targetSegments":[{"segment":"...","need":"..."}], "marketSize":"TAM/SAM/SOM note, qualitative if figures unknown", "trends":["..."], "competitors":[{"name":"...","note":"how this business differs"}], "positioning":"one sentence" } }\nBe specific to the industry. Only use statistics and market data grounded in real published sources (government bodies, industry associations, academic research, established market research firms). Only name real verifiable competitors — do not invent competitor names. If market size figures are estimates, label them as such.`);
     if (m) { acc = { ...acc, ...m }; setPlan({ ...acc }); }
 
     const off = await runStep("boffering", `Define products/services and the marketing & sales approach.\n\n${ctx()}\n\nReturn ONLY JSON:\n{ "productsServices":[{"name":"...","description":"...","pricing":"price or model","usp":"why it wins"}], "marketingSales":{"positioning":"...","channels":["..."],"acquisition":"how customers are won","salesProcess":"...","pricingStrategy":"..."} }\n2-5 products/services.`);
@@ -716,6 +815,24 @@ p{margin:5px 0;font-size:13.5px} .meta{color:#6b6f7a;font-size:12px;margin-botto
     finally { setExporting(false); }
   }
 
+  async function generateFinancials() {
+    setFinLoading(true); setFinError("");
+    try {
+      const financialContext = `${ctx()}\n\nExisting financial notes from the plan: ${JSON.stringify(plan.financialPlan || plan.financialGoals || {})}`;
+      const assumptions = extractJson(await callClaude(CONSULTANT, financialAssumptionsPrompt(financialContext), 2000));
+      setFinModel(computeStatements(assumptions));
+    } catch (e) {
+      setFinError("Couldn't build the financial statements — please try again.");
+    } finally {
+      setFinLoading(false);
+    }
+  }
+
+  // Stage 2: recompute statements live from edited assumptions
+  function updateFinancials(newAssumptions) {
+    setFinModel(computeStatements(newAssumptions));
+  }
+
   const activeSteps = docType === "strategic" ? STRAT_STEPS : docType === "healthcheck" ? HEALTH_STEPS : BIZ_STEPS;
 
   // ── Login gate — pilot access only ──
@@ -856,6 +973,11 @@ p{margin:5px 0;font-size:13.5px} .meta{color:#6b6f7a;font-size:12px;margin-botto
     );
   }
 
+  // Shared-plan view — someone opened a ?share=<token> link
+  if (shareToken) {
+    return <SharedPlanView token={shareToken} user={user} />;
+  }
+
   return (
     <div style={{ background: `linear-gradient(160deg, #060a16 0%, #081428 45%, #0a1a36 100%)`, color: C.ink, minHeight: "100%", fontFamily: "'Hanken Grotesk',sans-serif", position: "relative", overflow: "hidden" }}>
       <style>{FONTS}</style>
@@ -907,6 +1029,12 @@ p{margin:5px 0;font-size:13.5px} .meta{color:#6b6f7a;font-size:12px;margin-botto
                   <span style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{user?.email}</span>
                 </div>
                 <button
+                  onClick={openMyPlans}
+                  style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", border: "1px solid rgba(255,255,255,0.18)", background: "transparent", color: "#b9c6e0", borderRadius: 8, padding: "7px 12px", fontSize: 13 }}
+                >
+                  <BookOpen size={14} color={C.accent2} /> My plans
+                </button>
+                <button
                   onClick={handleLogout}
                   style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", border: "1px solid rgba(255,255,255,0.18)", background: "transparent", color: "#b9c6e0", borderRadius: 8, padding: "7px 12px", fontSize: 13 }}
                 >
@@ -952,6 +1080,21 @@ p{margin:5px 0;font-size:13.5px} .meta{color:#6b6f7a;font-size:12px;margin-botto
             return <button key={k} onClick={() => { setDocType(k); setPlan(null); setHealthResult(null); setUploadedFile(null); setUploadedText(""); setError(""); setGenErr(""); }} style={{ flex: 1, cursor: "pointer", border: `1px solid ${on ? C.ink : C.line}`, background: on ? C.ink : C.card, color: on ? C.paper : C.ink, borderRadius: 10, padding: "11px 14px", fontSize: 14, fontWeight: 600, fontFamily: "'Fraunces',serif" }}>{lbl}</button>;
           })}
         </div>
+
+        {/* Start from a template */}
+        {docType !== "healthcheck" && (
+          <div style={{ marginBottom: 20 }}>
+            <button onClick={() => setShowTemplates(true)} style={{ width: "100%", cursor: "pointer", border: `1px dashed ${C.accent2}`, background: "rgba(14,165,233,0.06)", color: C.ink, borderRadius: 10, padding: "12px 14px", fontSize: 13.5, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+              <BookOpen size={16} color={C.accent2} /> Start from an industry template <span style={{ color: C.muted, fontWeight: 500 }}>· {TEMPLATES.length} industries · {templateYear()}</span>
+            </button>
+          </div>
+        )}
+
+        {/* Templates gallery modal */}
+        {showTemplates && <TemplatesModal onClose={() => setShowTemplates(false)} onPick={applyTemplate} />}
+
+        {/* Saved plans modal */}
+        {showMyPlans && <MyPlansModal plans={myPlans} loading={plansLoading} error={plansError} onClose={() => setShowMyPlans(false)} onOpen={reopenPlan} onDelete={deleteSavedPlan} />}
 
         {/* Health check mode */}
         {docType === "healthcheck" ? (
@@ -1171,7 +1314,23 @@ p{margin:5px 0;font-size:13.5px} .meta{color:#6b6f7a;font-size:12px;margin-botto
             )}
             {saveMsg && <div style={{ fontSize: 13, color: saveMsg.startsWith("✓") ? C.accent2 : "#9a3412", marginBottom: 12 }}>{saveMsg}</div>}
             {exportMsg && <div style={{ fontSize: 13, color: exportMsg.startsWith("✓") ? C.accent2 : "#9a3412", marginBottom: 12 }}>{exportMsg}</div>}
+            {marketSources.length > 0 && (
+              <div style={{ background: C.card, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 16px", marginBottom: 12 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, fontWeight: 700, color: C.accent2, textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 6 }}><Globe size={14} /> Enhanced with live market data</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {marketSources.slice(0, 5).map((s, i) => (
+                    <a key={i} href={s.url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 12, color: C.muted, textDecoration: "none", border: `1px solid ${C.line}`, borderRadius: 6, padding: "3px 9px", maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.title || s.url}</a>
+                  ))}
+                </div>
+              </div>
+            )}
             {planType === "strategic" ? <StrategicView plan={plan} planFw={planFw} fwReasons={fwReasons} fwRationale={fwRationale} fwOpen={fwOpen} fwData={fwData} fwLoading={fwLoading} toggleFwCard={toggleFwCard} bizCtx={ctx()} role={role} /> : <BusinessView plan={plan} org={f.org} />}
+
+            {done && <FinancialsSection model={finModel} loading={finLoading} error={finError} onGenerate={generateFinancials} onEdit={updateFinancials} />}
+
+            {done && planType === "strategic" && <ExecutionTracking plan={plan} tracking={tracking} onSetStatus={setItemStatus} saved={!!currentPlanId} onSave={savePlan} />}
+
+            {done && <ShareComments planId={currentPlanId} user={user} onSave={savePlan} />}
 
             {done && (
               <section style={{ background: C.card, border: `1px solid ${C.line}`, borderRadius: 14, padding: 22, marginTop: 8 }}>
@@ -1670,6 +1829,514 @@ function BusinessView({ plan, org }) {
         </Block>
       )}
     </>
+  );
+}
+
+/* ---------- Saved plans modal ---------- */
+function MyPlansModal({ plans, loading, error, onClose, onOpen, onDelete }) {
+  const fmtDate = (s) => { try { return new Date(s).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }); } catch { return ""; } };
+  return (
+    <>
+      <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(6,10,22,0.6)", zIndex: 999, backdropFilter: "blur(2px)" }} />
+      <div style={{ position: "fixed", top: "50%", left: "50%", transform: "translate(-50%,-50%)", background: C.card, borderRadius: 18, width: "100%", maxWidth: 620, maxHeight: "86vh", overflowY: "auto", zIndex: 1000, boxShadow: "0 24px 60px rgba(6,10,22,0.4)", fontFamily: "'Hanken Grotesk',sans-serif", boxSizing: "border-box" }}>
+        <div style={{ position: "sticky", top: 0, background: C.card, padding: "24px 26px 14px", borderBottom: `1px solid ${C.line}`, borderRadius: "18px 18px 0 0", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+            <BookOpen size={20} color={C.accent2} />
+            <span style={{ fontFamily: "'Fraunces',serif", fontWeight: 600, fontSize: 22, color: C.ink }}>My saved plans</span>
+          </div>
+          <button onClick={onClose} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.muted, padding: 4 }}><XCircle size={22} /></button>
+        </div>
+        <div style={{ padding: "18px 26px 26px" }}>
+          {error && <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, color: "#9a3412", fontSize: 13 }}><AlertCircle size={16} /> {error}</div>}
+          {loading ? (
+            <div style={{ display: "flex", gap: 9, alignItems: "center", color: C.muted, fontSize: 14, padding: "20px 0" }}><Loader2 size={16} className="animate-spin" /> Loading your plans…</div>
+          ) : plans.length === 0 ? (
+            <p style={{ color: C.muted, fontSize: 14, textAlign: "center", padding: "24px 0" }}>No saved plans yet. Generate a plan and click <strong>Save plan</strong> to keep it here.</p>
+          ) : (
+            plans.map((p) => (
+              <div key={p.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "12px 0", borderBottom: `1px solid ${C.line}` }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, fontSize: 14.5, color: C.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.title}</div>
+                  <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{p.doc_type === "strategic" ? "Strategic plan" : "Business plan"} · saved {fmtDate(p.created_at)}</div>
+                </div>
+                <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                  <button onClick={() => onOpen(p.id)} style={{ cursor: "pointer", border: "none", background: `linear-gradient(145deg, ${C.accent2}, ${C.accent})`, color: "#fff", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 600 }}>Open</button>
+                  <button onClick={() => { if (window.confirm("Delete this saved plan? This can't be undone.")) onDelete(p.id); }} style={{ cursor: "pointer", border: `1px solid ${C.line}`, background: "transparent", color: C.muted, borderRadius: 8, padding: "8px 12px", fontSize: 13 }}>Delete</button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+/* ---------- Templates gallery modal ---------- */
+function TemplatesModal({ onClose, onPick }) {
+  const [cat, setCat] = useState("All");
+  const cats = ["All", ...TEMPLATE_CATEGORIES];
+  const shown = cat === "All" ? TEMPLATES : TEMPLATES.filter((t) => t.category === cat);
+  return (
+    <>
+      <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(6,10,22,0.6)", zIndex: 999, backdropFilter: "blur(2px)" }} />
+      <div style={{ position: "fixed", top: "50%", left: "50%", transform: "translate(-50%,-50%)", background: C.card, borderRadius: 18, width: "100%", maxWidth: 760, maxHeight: "88vh", overflowY: "auto", zIndex: 1000, boxShadow: "0 24px 60px rgba(6,10,22,0.4)", fontFamily: "'Hanken Grotesk',sans-serif", boxSizing: "border-box" }}>
+        <div style={{ position: "sticky", top: 0, background: C.card, padding: "24px 26px 14px", borderBottom: `1px solid ${C.line}`, borderRadius: "18px 18px 0 0" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+              <BookOpen size={20} color={C.accent2} />
+              <span style={{ fontFamily: "'Fraunces',serif", fontWeight: 600, fontSize: 22, color: C.ink }}>Industry templates</span>
+              <span style={{ fontSize: 11, fontWeight: 700, color: C.accent2, border: `1px solid ${C.accent2}`, borderRadius: 5, padding: "2px 8px" }}>{templateYear()}</span>
+            </div>
+            <button onClick={onClose} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.muted, padding: 4 }}><XCircle size={22} /></button>
+          </div>
+          <p style={{ color: C.muted, fontSize: 13, margin: "8px 0 12px" }}>Pick an industry to pre-fill the form with a realistic starting point. You can edit everything before generating.</p>
+          <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+            {cats.map((c) => { const on = cat === c; return <button key={c} onClick={() => setCat(c)} style={{ cursor: "pointer", border: `1px solid ${on ? C.ink : C.line}`, background: on ? C.ink : C.card, color: on ? C.paper : C.ink, borderRadius: 7, padding: "6px 11px", fontSize: 12.5, fontWeight: 600 }}>{c}</button>; })}
+          </div>
+        </div>
+        <div style={{ padding: "18px 26px 26px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          {shown.map((t) => (
+            <button key={t.id} onClick={() => onPick(t)} className="hover-lift" style={{ textAlign: "left", cursor: "pointer", border: `1px solid ${C.line}`, background: C.paper, borderRadius: 12, padding: "14px 15px", display: "flex", flexDirection: "column", gap: 6 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                <span style={{ fontSize: 22 }}>{t.emoji}</span>
+                <span style={{ fontFamily: "'Fraunces',serif", fontWeight: 600, fontSize: 15.5, color: C.ink }}>{t.name}</span>
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 11, fontWeight: 600, color: C.accent2, background: "rgba(14,165,233,0.1)", borderRadius: 5, padding: "2px 7px" }}>{t.docType === "strategic" ? "Strategic plan" : "Business plan"}</span>
+                <span style={{ fontSize: 11, fontWeight: 600, color: C.muted, background: C.card, border: `1px solid ${C.line}`, borderRadius: 5, padding: "2px 7px" }}>{t.stage}</span>
+              </div>
+              <p style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.45, margin: "2px 0 0" }}>{t.goals.length > 110 ? t.goals.slice(0, 109) + "…" : t.goals}</p>
+            </button>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
+/* ---------- Collaboration: share link + comments (owner side) ---------- */
+function ShareComments({ planId, user, onSave }) {
+  const [isShared, setIsShared] = useState(false);
+  const [token, setToken] = useState(null);
+  const [comments, setComments] = useState([]);
+  const [body, setBody] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!planId) return;
+    (async () => {
+      const { data } = await supabase.from("plans").select("is_shared, share_token").eq("id", planId).single();
+      if (data) { setIsShared(!!data.is_shared); setToken(data.share_token); }
+      loadComments();
+    })();
+    // eslint-disable-next-line
+  }, [planId]);
+
+  async function loadComments() {
+    const { data } = await supabase.from("plan_comments").select("*").eq("plan_id", planId).order("created_at", { ascending: true });
+    setComments(data || []);
+  }
+
+  async function toggleShare() {
+    setBusy(true);
+    const next = !isShared;
+    await supabase.from("plans").update({ is_shared: next }).eq("id", planId);
+    setIsShared(next); setBusy(false);
+  }
+
+  async function addComment() {
+    if (!body.trim()) return;
+    setBusy(true);
+    await supabase.from("plan_comments").insert({ plan_id: planId, author_email: user?.email || "unknown", body: body.trim() });
+    setBody(""); await loadComments(); setBusy(false);
+  }
+
+  const shareUrl = token ? `${window.location.origin}${window.location.pathname}?share=${token}` : "";
+  const copyLink = () => { navigator.clipboard?.writeText(shareUrl); setCopied(true); setTimeout(() => setCopied(false), 2500); };
+
+  if (!planId) {
+    return (
+      <section style={{ background: C.card, border: `1px solid ${C.line}`, borderRadius: 14, padding: 22, marginTop: 8, marginBottom: 16, boxShadow: "0 1px 2px rgba(11,18,32,0.04), 0 10px 24px -16px rgba(11,18,32,0.18)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+          <Users size={18} color={C.accent2} />
+          <h2 style={{ fontFamily: "'Fraunces',serif", fontSize: 21, fontWeight: 600, margin: 0, color: C.ink }}>Share &amp; collaborate</h2>
+        </div>
+        <p style={{ color: C.muted, fontSize: 13.5, marginTop: 0, marginBottom: 14 }}>Save this plan first, then you can share a view link and collect comments from your team.</p>
+        <button onClick={onSave} style={{ cursor: "pointer", border: `1px solid ${C.accent2}`, background: "transparent", color: C.accent2, borderRadius: 8, padding: "9px 14px", fontSize: 13.5, fontWeight: 600, display: "flex", alignItems: "center", gap: 7 }}><Save size={15} /> Save plan to enable sharing</button>
+      </section>
+    );
+  }
+
+  return (
+    <section style={{ background: C.card, border: `1px solid ${C.line}`, borderRadius: 14, padding: 22, marginTop: 8, marginBottom: 16, boxShadow: "0 1px 2px rgba(11,18,32,0.04), 0 10px 24px -16px rgba(11,18,32,0.18)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+        <Users size={18} color={C.accent2} />
+        <h2 style={{ fontFamily: "'Fraunces',serif", fontSize: 21, fontWeight: 600, margin: 0, color: C.ink }}>Share &amp; collaborate</h2>
+      </div>
+      <p style={{ color: C.muted, fontSize: 13, marginTop: 0, marginBottom: 16 }}>Share a read-only link so team members or a consultant can view this plan and leave comments.</p>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+        <button onClick={toggleShare} disabled={busy} style={{ cursor: busy ? "wait" : "pointer", border: "none", background: isShared ? "#e7f5f0" : `linear-gradient(145deg, ${C.accent2}, ${C.accent})`, color: isShared ? "#1d5c4e" : "#fff", borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 600, display: "flex", alignItems: "center", gap: 8 }}>
+          {isShared ? <><CheckCircle size={15} /> Sharing is on</> : <><Users size={15} /> Turn on sharing</>}
+        </button>
+        {isShared && <span style={{ fontSize: 12.5, color: C.muted }}>Anyone with the link can view (not edit).</span>}
+      </div>
+
+      {isShared && (
+        <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap" }}>
+          <input readOnly value={shareUrl} onClick={(e) => e.target.select()} style={{ ...inputStyle, flex: 1, minWidth: 220, fontSize: 12.5 }} />
+          <button onClick={copyLink} style={{ cursor: "pointer", border: `1px solid ${C.line}`, background: C.paper, color: C.ink, borderRadius: 8, padding: "0 16px", fontSize: 13, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy link"}</button>
+        </div>
+      )}
+
+      <Sub>Comments</Sub>
+      <div style={{ marginBottom: 12 }}>
+        {comments.length === 0 ? (
+          <p style={{ color: C.muted, fontSize: 13, margin: "4px 0 12px" }}>No comments yet.</p>
+        ) : comments.map((c) => (
+          <div key={c.id} style={{ padding: "10px 0", borderBottom: `1px solid ${C.line}` }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginBottom: 3 }}>
+              <span style={{ fontSize: 12.5, fontWeight: 700, color: C.accent2 }}>{c.author_email}</span>
+              <span style={{ fontSize: 11.5, color: C.muted }}>{new Date(c.created_at).toLocaleString()}</span>
+            </div>
+            <div style={{ fontSize: 14, lineHeight: 1.5 }}>{c.body}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <input value={body} onChange={(e) => setBody(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addComment(); }} placeholder="Add a comment…" style={{ ...inputStyle, flex: 1, minWidth: 220 }} />
+        <button onClick={addComment} disabled={busy || !body.trim()} style={{ cursor: busy ? "wait" : "pointer", border: "none", background: C.ink, color: C.paper, borderRadius: 8, padding: "0 18px", fontSize: 13.5, fontWeight: 600 }}>Post</button>
+      </div>
+    </section>
+  );
+}
+
+/* ---------- Collaboration: shared read-only plan view (recipient side) ---------- */
+function SharedPlanView({ token, user }) {
+  const [state, setState] = useState("loading"); // loading | ok | notfound
+  const [planRow, setPlanRow] = useState(null);
+  const [comments, setComments] = useState([]);
+  const [body, setBody] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const { data, error } = await supabase
+        .from("plans")
+        .select("id, title, doc_type, content")
+        .eq("share_token", token)
+        .eq("is_shared", true)
+        .maybeSingle();
+      if (error || !data) { setState("notfound"); return; }
+      setPlanRow(data); setState("ok");
+      const { data: cs } = await supabase.from("plan_comments").select("*").eq("plan_id", data.id).order("created_at", { ascending: true });
+      setComments(cs || []);
+    })();
+    // eslint-disable-next-line
+  }, [token]);
+
+  async function addComment() {
+    if (!body.trim() || !planRow) return;
+    setBusy(true);
+    await supabase.from("plan_comments").insert({ plan_id: planRow.id, author_email: user?.email || "unknown", body: body.trim() });
+    setBody("");
+    const { data: cs } = await supabase.from("plan_comments").select("*").eq("plan_id", planRow.id).order("created_at", { ascending: true });
+    setComments(cs || []); setBusy(false);
+  }
+
+  const wrap = (children) => (
+    <div style={{ background: `linear-gradient(160deg, #060a16 0%, #081428 45%, #0a1a36 100%)`, minHeight: "100vh", fontFamily: "'Hanken Grotesk',sans-serif" }}>
+      <style>{FONTS}</style>
+      <div style={{ maxWidth: 820, margin: "0 auto", padding: "32px 22px 64px" }}>{children}</div>
+    </div>
+  );
+
+  if (state === "loading") return wrap(<div style={{ display: "flex", gap: 10, alignItems: "center", color: "#b9c6e0", fontSize: 15 }}><Loader2 size={20} className="animate-spin" /> Loading shared plan…</div>);
+  if (state === "notfound") return wrap(
+    <div style={{ background: C.card, borderRadius: 14, padding: 30, textAlign: "center" }}>
+      <AlertCircle size={28} color="#9a3412" style={{ marginBottom: 10 }} />
+      <div style={{ fontFamily: "'Fraunces',serif", fontSize: 20, fontWeight: 600, marginBottom: 6 }}>Plan not available</div>
+      <p style={{ color: C.muted, fontSize: 14 }}>This shared link is invalid or sharing has been turned off. <a href={window.location.pathname} style={{ color: C.accent2, fontWeight: 600 }}>Go to Plangenic</a></p>
+    </div>
+  );
+
+  const sections = planToSections(planRow.content, planRow.doc_type, planRow.title);
+  return wrap(
+    <>
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <Compass size={18} color={C.accent} />
+          <span style={{ fontSize: 11, letterSpacing: ".3em", textTransform: "uppercase", color: "#9fb0d0", fontWeight: 600 }}>Shared {planRow.doc_type === "strategic" ? "Strategic Plan" : "Business Plan"} · read-only</span>
+        </div>
+        <h1 style={{ fontFamily: "'Fraunces',serif", fontWeight: 600, fontSize: 34, color: "#fff", margin: 0 }}>{planRow.title}</h1>
+      </div>
+
+      <div style={{ background: C.card, borderRadius: 14, padding: "26px 28px", marginBottom: 16 }}>
+        {sections.map(([h, lines], i) => (
+          <div key={i} style={{ marginBottom: 20 }}>
+            <h2 style={{ fontFamily: "'Fraunces',serif", fontSize: 18, fontWeight: 600, color: C.ink, borderBottom: `1px solid ${C.line}`, paddingBottom: 6, marginBottom: 10 }}>{h}</h2>
+            {lines.map((ln, j) => { const t = String(ln); const indent = t.startsWith("  "); return <p key={j} style={{ fontSize: 14, lineHeight: 1.55, margin: "4px 0", marginLeft: indent ? 16 : 0, color: indent ? C.muted : C.ink }}>{t.trim()}</p>; })}
+          </div>
+        ))}
+      </div>
+
+      <div style={{ background: C.card, borderRadius: 14, padding: "22px 24px" }}>
+        <Sub>Comments</Sub>
+        {comments.length === 0 ? <p style={{ color: C.muted, fontSize: 13, margin: "4px 0 12px" }}>No comments yet — be the first.</p> : comments.map((c) => (
+          <div key={c.id} style={{ padding: "10px 0", borderBottom: `1px solid ${C.line}` }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginBottom: 3 }}>
+              <span style={{ fontSize: 12.5, fontWeight: 700, color: C.accent2 }}>{c.author_email}</span>
+              <span style={{ fontSize: 11.5, color: C.muted }}>{new Date(c.created_at).toLocaleString()}</span>
+            </div>
+            <div style={{ fontSize: 14, lineHeight: 1.5 }}>{c.body}</div>
+          </div>
+        ))}
+        {user ? (
+          <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+            <input value={body} onChange={(e) => setBody(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addComment(); }} placeholder="Add a comment…" style={{ ...inputStyle, flex: 1, minWidth: 220 }} />
+            <button onClick={addComment} disabled={busy || !body.trim()} style={{ cursor: "pointer", border: "none", background: C.ink, color: C.paper, borderRadius: 8, padding: "0 18px", fontSize: 13.5, fontWeight: 600 }}>Post</button>
+          </div>
+        ) : (
+          <p style={{ color: C.muted, fontSize: 13, marginTop: 12 }}>Log in to Plangenic to leave a comment.</p>
+        )}
+      </div>
+    </>
+  );
+}
+
+/* ---------- Execution tracking (status per goal / KPI / milestone) ---------- */
+const TRACK_STATUSES = [
+  { key: "not-started", label: "Not started", color: "#6b7280", bg: "#f3f4f6" },
+  { key: "on-track", label: "On track", color: "#1d5c4e", bg: "#e7f5f0" },
+  { key: "at-risk", label: "At risk", color: "#9a6a00", bg: "#fdf3e0" },
+  { key: "done", label: "Done", color: "#1e4fd6", bg: "#e7eefc" },
+];
+
+function ExecutionTracking({ plan, tracking, onSetStatus, saved, onSave }) {
+  const items = [];
+  (plan.goals || []).forEach((g, i) => items.push({ key: `goal:${i}`, group: "Goals", label: g.goal }));
+  (plan.kpis || []).forEach((k, i) => items.push({ key: `kpi:${i}`, group: "KPIs", label: `${k.kpi}${k.target ? ` — ${k.target}` : ""}` }));
+  (plan.milestones || []).forEach((m, i) => items.push({ key: `milestone:${i}`, group: "Milestones", label: `${m.milestone}${m.when ? ` (${m.when})` : ""}` }));
+
+  if (items.length === 0) return null;
+
+  const statusOf = (k) => tracking[k] || "not-started";
+  const counts = TRACK_STATUSES.reduce((acc, s) => ({ ...acc, [s.key]: items.filter((it) => statusOf(it.key) === s.key).length }), {});
+  const doneCount = counts["done"];
+  const pctDone = Math.round((doneCount / items.length) * 100);
+  const groups = ["Goals", "KPIs", "Milestones"].filter((g) => items.some((it) => it.group === g));
+
+  return (
+    <section style={{ background: C.card, border: `1px solid ${C.line}`, borderRadius: 14, padding: 22, marginTop: 8, marginBottom: 16, boxShadow: "0 1px 2px rgba(11,18,32,0.04), 0 10px 24px -16px rgba(11,18,32,0.18)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+        <Activity size={18} color={C.accent2} />
+        <h2 style={{ fontFamily: "'Fraunces',serif", fontSize: 21, fontWeight: 600, margin: 0, color: C.ink }}>Execution tracking</h2>
+      </div>
+      <p style={{ color: C.muted, fontSize: 13, marginTop: 0, marginBottom: 16 }}>Mark each goal, KPI and milestone as you progress. {saved ? "Changes save automatically to your account." : "Save this plan to keep your progress."}</p>
+
+      {/* At-a-glance dashboard */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 8 }}>
+        {TRACK_STATUSES.map((s) => (
+          <div key={s.key} style={{ flex: "1 1 120px", background: s.bg, borderRadius: 10, padding: "10px 14px" }}>
+            <div style={{ fontSize: 22, fontWeight: 700, color: s.color }}>{counts[s.key]}</div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: s.color }}>{s.label}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ margin: "10px 0 20px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: C.muted, marginBottom: 5 }}><span>Overall progress</span><span style={{ fontWeight: 700, color: C.accent2 }}>{pctDone}% done</span></div>
+        <div style={{ height: 10, background: C.paper, borderRadius: 99, overflow: "hidden", border: `1px solid ${C.line}` }}>
+          <div style={{ width: `${pctDone}%`, height: "100%", background: `linear-gradient(90deg, ${C.accent2}, ${C.accent})`, transition: "width .5s" }} />
+        </div>
+      </div>
+
+      {!saved && (
+        <div style={{ marginBottom: 16 }}>
+          <button onClick={onSave} style={{ cursor: "pointer", border: `1px solid ${C.accent2}`, background: "transparent", color: C.accent2, borderRadius: 8, padding: "9px 14px", fontSize: 13.5, fontWeight: 600, display: "flex", alignItems: "center", gap: 7 }}>
+            <Save size={15} /> Save plan to keep progress
+          </button>
+        </div>
+      )}
+
+      {groups.map((g) => (
+        <div key={g} style={{ marginBottom: 18 }}>
+          <Sub>{g}</Sub>
+          {items.filter((it) => it.group === g).map((it) => {
+            const cur = statusOf(it.key);
+            return (
+              <div key={it.key} style={{ padding: "10px 0", borderBottom: `1px solid ${C.line}` }}>
+                <div style={{ fontSize: 14, marginBottom: 8, lineHeight: 1.4 }}>{it.label}</div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {TRACK_STATUSES.map((s) => { const on = cur === s.key; return (
+                    <button key={s.key} onClick={() => onSetStatus(it.key, s.key)} style={{ cursor: "pointer", border: `1px solid ${on ? s.color : C.line}`, background: on ? s.bg : C.card, color: on ? s.color : C.muted, borderRadius: 7, padding: "5px 11px", fontSize: 12.5, fontWeight: 600 }}>{s.label}</button>
+                  ); })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ))}
+    </section>
+  );
+}
+
+/* ---------- Financial statements (Stage 1: AI-generated three-statement model) ---------- */
+function FinancialsSection({ model, loading, error, onGenerate, onEdit }) {
+  const [tab, setTab] = useState("pl");
+  const [editing, setEditing] = useState(false);
+
+  if (!model) {
+    return (
+      <section style={{ background: C.card, border: `1px solid ${C.line}`, borderRadius: 14, padding: 22, marginTop: 8, marginBottom: 16, boxShadow: "0 1px 2px rgba(11,18,32,0.04), 0 10px 24px -16px rgba(11,18,32,0.18)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+          <Calculator size={18} color={C.accent2} />
+          <h2 style={{ fontFamily: "'Fraunces',serif", fontSize: 21, fontWeight: 600, margin: 0, color: C.ink }}>Financial statements</h2>
+        </div>
+        <p style={{ color: C.muted, fontSize: 13.5, marginTop: 0, marginBottom: 16, lineHeight: 1.55 }}>
+          Generate a 3-year profit &amp; loss, cash flow, and balance sheet from your plan. Figures are illustrative estimates you'll soon be able to edit line-by-line.
+        </p>
+        {error && <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, color: "#9a3412", fontSize: 13 }}><AlertCircle size={16} /> {error}</div>}
+        <button onClick={onGenerate} disabled={loading} style={{ cursor: loading ? "wait" : "pointer", border: "none", background: `linear-gradient(145deg, ${C.accent2}, ${C.accent})`, color: "#fff", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 600, display: "flex", alignItems: "center", gap: 9, boxShadow: "0 6px 14px -4px rgba(37,99,235,0.5)" }}>
+          {loading ? <><Loader2 size={16} className="animate-spin" /> Building your financial statements…</> : <><Calculator size={16} /> Generate financial statements</>}
+        </button>
+      </section>
+    );
+  }
+
+  const { currency, basis, years } = model;
+  const fm = (n) => formatMoney(n, currency);
+  const pct = (n) => `${(Number(n) || 0).toFixed(1)}%`;
+
+  const TABS = [["pl", "Profit & Loss"], ["cf", "Cash Flow"], ["bs", "Balance Sheet"]];
+  const yearCols = years.map((y) => y.label);
+
+  const StatementTable = ({ rows }) => (
+    <div style={{ overflowX: "auto" }}>
+      <div style={{ border: `1px solid ${C.line}`, borderRadius: 8, overflow: "hidden", minWidth: 420 }}>
+        <div style={{ display: "grid", gridTemplateColumns: `1.6fr repeat(${years.length}, 1fr)`, background: C.paper, fontSize: 11.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".05em", color: C.muted }}>
+          <span style={{ padding: "9px 12px" }}>Line item</span>
+          {yearCols.map((y) => <span key={y} style={{ padding: "9px 12px", textAlign: "right" }}>{y}</span>)}
+        </div>
+        {rows.map((r, i) => (
+          <div key={i} style={{ display: "grid", gridTemplateColumns: `1.6fr repeat(${years.length}, 1fr)`, fontSize: 13.5, borderTop: `1px solid ${C.line}`, background: r.strong ? C.paper : "transparent" }}>
+            <span style={{ padding: "8px 12px", fontWeight: r.strong ? 700 : 500, color: r.indent ? C.muted : C.ink, paddingLeft: r.indent ? 24 : 12 }}>{r.label}</span>
+            {r.values.map((v, j) => <span key={j} style={{ padding: "8px 12px", textAlign: "right", fontWeight: r.strong ? 700 : 400, color: r.strong ? C.accent2 : C.ink }}>{r.isPct ? pct(v) : fm(v)}</span>)}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  const plRows = [
+    { label: "Revenue", strong: true, values: years.map((y) => y.pl.revenue) },
+    { label: "Cost of goods sold", indent: true, values: years.map((y) => -y.pl.cogs) },
+    { label: "Gross profit", strong: true, values: years.map((y) => y.pl.grossProfit) },
+    { label: "Gross margin", indent: true, isPct: true, values: years.map((y) => y.pl.grossMarginPct) },
+    { label: "Operating expenses", indent: true, values: years.map((y) => -y.pl.opex) },
+    { label: "EBITDA", strong: true, values: years.map((y) => y.pl.ebitda) },
+    { label: "Depreciation", indent: true, values: years.map((y) => -y.pl.depreciation) },
+    { label: "Interest", indent: true, values: years.map((y) => -y.pl.interest) },
+    { label: "Profit before tax", values: years.map((y) => y.pl.profitBeforeTax) },
+    { label: "Tax", indent: true, values: years.map((y) => -y.pl.tax) },
+    { label: "Net profit", strong: true, values: years.map((y) => y.pl.netProfit) },
+    { label: "Net margin", indent: true, isPct: true, values: years.map((y) => y.pl.netMarginPct) },
+  ];
+  const cfRows = [
+    { label: "Opening cash", values: years.map((y) => y.cashFlow.openingCash) },
+    { label: "Operating cash flow", indent: true, values: years.map((y) => y.cashFlow.operatingCF) },
+    { label: "Investing cash flow", indent: true, values: years.map((y) => y.cashFlow.investingCF) },
+    { label: "Financing cash flow", indent: true, values: years.map((y) => y.cashFlow.financingCF) },
+    { label: "Net cash flow", strong: true, values: years.map((y) => y.cashFlow.netCF) },
+    { label: "Closing cash", strong: true, values: years.map((y) => y.cashFlow.closingCash) },
+  ];
+  const bsRows = [
+    { label: "Cash", indent: true, values: years.map((y) => y.balance.cash) },
+    { label: "Fixed assets (net)", indent: true, values: years.map((y) => y.balance.netFixedAssets) },
+    { label: "Total assets", strong: true, values: years.map((y) => y.balance.totalAssets) },
+    { label: "Loans / liabilities", indent: true, values: years.map((y) => y.balance.loan) },
+    { label: "Total liabilities", strong: true, values: years.map((y) => y.balance.loan) },
+    { label: "Opening equity", indent: true, values: years.map((y) => y.balance.openingEquity) },
+    { label: "Paid-in capital", indent: true, values: years.map((y) => y.balance.paidInCapital) },
+    { label: "Retained earnings", indent: true, values: years.map((y) => y.balance.retainedEarnings) },
+    { label: "Total equity", strong: true, values: years.map((y) => y.balance.totalEquity) },
+  ];
+  const rows = tab === "pl" ? plRows : tab === "cf" ? cfRows : bsRows;
+
+  return (
+    <section style={{ background: C.card, border: `1px solid ${C.line}`, borderRadius: 14, padding: 22, marginTop: 8, marginBottom: 16, boxShadow: "0 1px 2px rgba(11,18,32,0.04), 0 10px 24px -16px rgba(11,18,32,0.18)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+        <Calculator size={18} color={C.accent2} />
+        <h2 style={{ fontFamily: "'Fraunces',serif", fontSize: 21, fontWeight: 600, margin: 0, color: C.ink }}>Financial statements</h2>
+        <span style={{ fontSize: 11, fontWeight: 700, color: C.accent2, border: `1px solid ${C.accent2}`, borderRadius: 5, padding: "2px 8px", marginLeft: 4 }}>{currency}</span>
+      </div>
+      {basis && <p style={{ color: C.muted, fontSize: 12.5, marginTop: 0, marginBottom: 14, lineHeight: 1.5, fontStyle: "italic" }}>{basis}</p>}
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16, justifyContent: "space-between" }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {TABS.map(([k, lbl]) => { const on = tab === k; return <button key={k} onClick={() => setTab(k)} style={{ cursor: "pointer", border: `1px solid ${on ? C.ink : C.line}`, background: on ? C.ink : C.card, color: on ? C.paper : C.ink, borderRadius: 9, padding: "8px 14px", fontSize: 13.5, fontWeight: 600 }}>{lbl}</button>; })}
+        </div>
+        <button onClick={() => setEditing((v) => !v)} style={{ cursor: "pointer", border: `1px solid ${editing ? C.accent2 : C.line}`, background: editing ? "rgba(14,165,233,0.08)" : C.card, color: editing ? C.accent2 : C.ink, borderRadius: 9, padding: "8px 14px", fontSize: 13.5, fontWeight: 600, display: "flex", alignItems: "center", gap: 7 }}>
+          <Settings size={15} /> {editing ? "Hide inputs" : "Edit inputs"}
+        </button>
+      </div>
+
+      {editing && <AssumptionsEditor assumptions={model.assumptions} onEdit={onEdit} />}
+
+      <StatementTable rows={rows} />
+      <div style={{ fontSize: 12, color: C.muted, marginTop: 14, fontStyle: "italic" }}>
+        {editing ? "Adjust any input above and the three statements recompute instantly." : "Illustrative estimates — click \"Edit inputs\" to enter your own figures, then validate with a qualified advisor before use."}
+      </div>
+    </section>
+  );
+}
+
+/* Editable assumptions panel — recomputes the statements live (Stage 2 hybrid) */
+function AssumptionsEditor({ assumptions, onEdit }) {
+  const a = assumptions;
+  const g = Array.isArray(a.revenueGrowthPct) ? a.revenueGrowthPct : [a.revenueGrowthPct || 0, a.revenueGrowthPct || 0];
+  const change = (patch) => onEdit({ ...a, ...patch });
+  const changeGrowth = (idx, val) => { const ng = [...g]; ng[idx] = Number(val); change({ revenueGrowthPct: ng }); };
+
+  const fields = [
+    { k: "startingAnnualRevenue", label: "Starting annual revenue ($)" },
+    { k: "cogsPctOfRevenue", label: "Cost of goods (% of revenue)" },
+    { k: "year1OperatingExpenses", label: "Year 1 operating expenses ($)" },
+    { k: "opexGrowthPct", label: "Opex growth (% / yr)" },
+    { k: "taxRatePct", label: "Tax rate (%)" },
+    { k: "startingCash", label: "Starting cash ($)" },
+    { k: "equityInjection", label: "Equity injection Yr 1 ($)" },
+    { k: "loanAmount", label: "Loan amount ($)" },
+    { k: "loanInterestPct", label: "Loan interest (%)" },
+    { k: "annualCapex", label: "Annual capex ($)" },
+    { k: "depreciationPct", label: "Depreciation (% / yr)" },
+  ];
+
+  const inp = { width: "100%", border: `1px solid ${C.line}`, background: C.card, color: C.ink, borderRadius: 7, padding: "8px 10px", fontSize: 13.5, fontFamily: "'Hanken Grotesk',sans-serif", outline: "none", boxSizing: "border-box" };
+  const lab = { fontSize: 11, letterSpacing: ".03em", color: C.muted, fontWeight: 600, marginBottom: 4, display: "block" };
+
+  return (
+    <div style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
+      <Sub>Your assumptions</Sub>
+      <p style={{ fontSize: 12, color: C.muted, margin: "0 0 12px" }}>Edit any figure below — the P&amp;L, cash flow and balance sheet update instantly.</p>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
+        <label><span style={lab}>Currency</span>
+          <input value={a.currency || "AUD"} onChange={(e) => change({ currency: e.target.value })} style={inp} />
+        </label>
+        {fields.map((f) => (
+          <label key={f.k}><span style={lab}>{f.label}</span>
+            <input type="number" value={a[f.k] ?? 0} onChange={(e) => change({ [f.k]: Number(e.target.value) })} style={inp} />
+          </label>
+        ))}
+        <label><span style={lab}>Revenue growth Yr 2 (%)</span>
+          <input type="number" value={g[0] ?? 0} onChange={(e) => changeGrowth(0, e.target.value)} style={inp} />
+        </label>
+        <label><span style={lab}>Revenue growth Yr 3 (%)</span>
+          <input type="number" value={g[1] ?? 0} onChange={(e) => changeGrowth(1, e.target.value)} style={inp} />
+        </label>
+      </div>
+    </div>
   );
 }
 
