@@ -28,6 +28,7 @@ const QUALIFICATIONS = [
 ];
 
 const MEMBERSHIPS = [
+  "TOTORU Membership Member",
   "Institute of Management Consultants (IMC)",
   "Certified Management Consultant (CMC)",
   "Institute of Managers and Leaders ANZ (IML ANZ)",
@@ -110,7 +111,9 @@ export default function AuthModal({ onClose, onAuthSuccess }) {
   // Step 3: consultant declarations → create account
   async function handleConsultantNext() {
     setError("");
-    if (!qualification) { setError("Please select your highest qualification."); return; }
+    const isTotoruMember = memberships.includes("TOTORU Membership Member");
+    // TOTORU membership is a standalone eligibility path — no formal qualification required.
+    if (!isTotoruMember && !qualification) { setError("Please select your highest qualification (or select TOTORU Membership Member)."); return; }
     if (memberships.length === 0) { setError("Please select at least one professional membership or registration."); return; }
     if (!declarationsAgreed) { setError("Please confirm that your declarations are true and correct."); return; }
     await handleCreateAccount();

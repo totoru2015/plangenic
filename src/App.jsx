@@ -455,6 +455,9 @@ export default function App() {
 
   const [docType, setDocType] = useState("strategic");
   const [role, setRole] = useState("owner");
+  // Apply the account's profile role, and lock each account to its own role
+  const roleLocked = userProfile?.role === "owner" || userProfile?.role === "consultant";
+  useEffect(() => { if (userProfile?.role) setRole(userProfile.role); }, [userProfile]);
   const [f, setF] = useState({ org: "", industry: "", stage: STAGES[1], goals: "", objectives: "", horizon: HORIZONS[2], constraints: "", includeCultural: false, compliance: [], auStates: [], jurisdiction: "" });
   const set = (k) => (e) => setF((p) => ({ ...p, [k]: e.target.value }));
   function applyTemplate(t) {
@@ -1060,16 +1063,19 @@ p{margin:5px 0;font-size:13.5px} .meta{color:#6b6f7a;font-size:12px;margin-botto
           <div style={{ marginBottom: 16 }}>
             <span style={{ fontSize: 11, letterSpacing: ".09em", textTransform: "uppercase", color: "#9fb0d0", fontWeight: 600 }}>I am a…</span>
             <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-              {[["owner", "Business owner", "The app chooses the right analysis methods for your business stage and goals."], ["consultant", "Business consultant", "Full access — choose any model, framework or method yourself."]].map(([k, lbl, desc]) => {
+              {[["owner", "Business owner", "The app chooses the right analysis methods for your business stage and goals."], ["consultant", "Business consultant", "Full access — choose any model, framework or method yourself."]]
+                .filter(([k]) => !roleLocked || k === userProfile.role)
+                .map(([k, lbl, desc]) => {
                 const on = role === k;
                 return (
-                  <button key={k} onClick={() => chooseRole(k)} style={{ flex: 1, textAlign: "left", cursor: "pointer", border: `1px solid ${on ? C.ink : C.line}`, background: on ? C.ink : C.card, color: on ? C.paper : C.ink, borderRadius: 10, padding: "12px 14px" }}>
+                  <button key={k} onClick={() => { if (!roleLocked) chooseRole(k); }} style={{ flex: 1, textAlign: "left", cursor: roleLocked ? "default" : "pointer", border: `1px solid ${on ? C.ink : C.line}`, background: on ? C.ink : C.card, color: on ? C.paper : C.ink, borderRadius: 10, padding: "12px 14px" }}>
                     <div style={{ fontSize: 14.5, fontWeight: 600, fontFamily: "'Fraunces',serif" }}>{lbl}</div>
                     <div style={{ fontSize: 12, color: on ? "#aebbd6" : C.muted, marginTop: 3, lineHeight: 1.4 }}>{desc}</div>
                   </button>
                 );
               })}
             </div>
+            {roleLocked && <div style={{ fontSize: 12, color: "#9fb0d0", marginTop: 8 }}>This account is set to business-{userProfile.role === "consultant" ? "consultant" : "owner"} access.</div>}
           </div>
         )}
 
@@ -1084,8 +1090,8 @@ p{margin:5px 0;font-size:13.5px} .meta{color:#6b6f7a;font-size:12px;margin-botto
         {/* Start from a template */}
         {docType !== "healthcheck" && (
           <div style={{ marginBottom: 20 }}>
-            <button onClick={() => setShowTemplates(true)} style={{ width: "100%", cursor: "pointer", border: `1px dashed ${C.accent2}`, background: "rgba(14,165,233,0.06)", color: C.ink, borderRadius: 10, padding: "12px 14px", fontSize: 13.5, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-              <BookOpen size={16} color={C.accent2} /> Start from an industry template <span style={{ color: C.muted, fontWeight: 500 }}>· {TEMPLATES.length} industries · {templateYear()}</span>
+            <button onClick={() => setShowTemplates(true)} style={{ width: "100%", cursor: "pointer", border: `1px dashed ${C.accent2}`, background: "rgba(14,165,233,0.12)", color: "#ffffff", borderRadius: 10, padding: "12px 14px", fontSize: 13.5, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+              <BookOpen size={16} color={C.accent2} /> Start from an industry template <span style={{ color: "#b9c6e0", fontWeight: 500 }}>· {TEMPLATES.length} industries · {templateYear()}</span>
             </button>
           </div>
         )}
