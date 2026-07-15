@@ -48,6 +48,7 @@ export default function AuthModal({ onClose, onAuthSuccess }) {
   const [role, setRole] = useState(""); // 'owner' | 'consultant'
   const [qualification, setQualification] = useState("");
   const [memberships, setMemberships] = useState([]);
+  const [memberNumber, setMemberNumber] = useState("");
   const [declarationsAgreed, setDeclarationsAgreed] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -58,7 +59,7 @@ export default function AuthModal({ onClose, onAuthSuccess }) {
   }
 
   function resetSignup() {
-    setStep(1); setRole(""); setQualification(""); setMemberships([]); setDeclarationsAgreed(false);
+    setStep(1); setRole(""); setQualification(""); setMemberships([]); setMemberNumber(""); setDeclarationsAgreed(false);
     setError(""); setSuccess("");
   }
 
@@ -115,6 +116,15 @@ export default function AuthModal({ onClose, onAuthSuccess }) {
     // TOTORU membership is a standalone eligibility path — no formal qualification required.
     if (!isTotoruMember && !qualification) { setError("Please select your highest qualification (or select TOTORU Membership Member)."); return; }
     if (memberships.length === 0) { setError("Please select at least one professional membership or registration."); return; }
+    if (isTotoruMember) {
+      const num = memberNumber.trim();
+      if (!num) { setError("Please enter your TOTORU member number to complete registration."); return; }
+      setLoading(true);
+      const { data: valid, error: vErr } = await supabase.rpc("is_totoru_member", { num });
+      setLoading(false);
+      if (vErr) { setError("Couldn't verify your member number right now. Please try again."); return; }
+      if (!valid) { setError("That TOTORU member number wasn't found. Please check and try again."); return; }
+    }
     if (!declarationsAgreed) { setError("Please confirm that your declarations are true and correct."); return; }
     await handleCreateAccount();
   }
@@ -135,6 +145,7 @@ export default function AuthModal({ onClose, onAuthSuccess }) {
         role,
         qualification: role === "consultant" ? qualification : null,
         memberships: role === "consultant" ? memberships : [],
+        member_number: role === "consultant" && memberships.includes("TOTORU Membership Member") ? memberNumber.trim() : null,
         declarations_agreed: role === "consultant" ? declarationsAgreed : false,
       });
       if (profileError) throw profileError;
@@ -372,6 +383,19 @@ export default function AuthModal({ onClose, onAuthSuccess }) {
                   );
                 })}
               </div>
+              {memberships.includes("TOTORU Membership Member") && (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, color: C.ink, marginBottom: 5 }}>TOTORU member number <span style={{ color: "#c0392b" }}>*</span></div>
+                  <input
+                    type="text"
+                    value={memberNumber}
+                    onChange={(e) => setMemberNumber(e.target.value)}
+                    placeholder="e.g. 701"
+                    style={{ ...inputStyle, paddingLeft: 14 }}
+                  />
+                  <div style={{ fontSize: 12, color: C.muted, marginTop: 5, lineHeight: 1.4 }}>Required — your registration is verified against your TOTORU membership.</div>
+                </div>
+              )}
             </div>
 
             {/* Declaration */}

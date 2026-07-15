@@ -2291,8 +2291,9 @@ function FinancialsSection({ model, loading, error, onGenerate, onEdit }) {
       {editing && <AssumptionsEditor assumptions={model.assumptions} onEdit={onEdit} />}
 
       <StatementTable rows={rows} />
-      <div style={{ fontSize: 12, color: C.muted, marginTop: 14, fontStyle: "italic" }}>
-        {editing ? "Adjust any input above and the three statements recompute instantly." : "Illustrative estimates — click \"Edit inputs\" to enter your own figures, then validate with a qualified advisor before use."}
+      {editing && <div style={{ fontSize: 12, color: C.muted, marginTop: 14, fontStyle: "italic" }}>Adjust any input above and the three statements recompute instantly.</div>}
+      <div style={{ marginTop: 14, padding: "10px 12px", background: C.paper, borderLeft: `3px solid ${C.accent}`, borderRadius: 4, fontSize: 12, color: C.muted, lineHeight: 1.5 }}>
+        <strong style={{ color: C.ink }}>Accounting disclaimer:</strong> These profit &amp; loss, cash flow and balance sheet figures are illustrative projections generated from your assumptions. They are <strong>not professionally prepared, audited or reviewed financial statements</strong> and should not be relied upon for tax, lodgement, lending, investment or other financial decisions. Consult a qualified accountant or financial adviser before acting on them.
       </div>
     </section>
   );
@@ -2328,7 +2329,11 @@ function AssumptionsEditor({ assumptions, onEdit }) {
       <p style={{ fontSize: 12, color: C.muted, margin: "0 0 12px" }}>Edit any figure below — the P&amp;L, cash flow and balance sheet update instantly.</p>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
         <label><span style={lab}>Currency</span>
-          <input value={a.currency || "AUD"} onChange={(e) => change({ currency: e.target.value })} style={inp} />
+          <select value={a.currency || "AUD"} onChange={(e) => change({ currency: e.target.value })} style={inp}>
+            <option value="AUD">AUD — Australian Dollar</option>
+            <option value="NZD">NZD — New Zealand Dollar</option>
+            <option value="USD">USD — US Dollar</option>
+          </select>
         </label>
         {fields.map((f) => (
           <label key={f.k}><span style={lab}>{f.label}</span>
