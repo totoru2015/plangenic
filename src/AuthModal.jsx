@@ -132,23 +132,30 @@ export default function AuthModal({ onClose, onAuthSuccess }) {
   async function handleCreateAccount() {
     setLoading(true); setError("");
     try {
-      // Create auth account
-      const { data, error: signUpError } = await supabase.auth.signUp({ email, password });
+      const isConsultant = role === "consultant";
+      const profileData = {
+        role,
+        qualification: isConsultant ? qualification : null,
+        memberships: isConsultant ? memberships : [],
+        member_number: isConsultant && memberships.includes("TOTORU Membership Member") ? memberNumber.trim() : null,
+        declarations_agreed: isConsultant ? declarationsAgreed : false,
+      };
+
+      // Store the role/details in auth metadata — this survives email confirmation,
+      // so the profile can be created reliably on first login (see loadProfile in App).
+      const { data, error: signUpError } = await supabase.auth.signUp({
+        email,
+        password,
+        options: { data: profileData },
+      });
       if (signUpError) throw signUpError;
 
       const userId = data.user?.id;
       if (!userId) throw new Error("Account creation failed. Please try again.");
 
-      // Save profile
-      const { error: profileError } = await supabase.from("profiles").insert({
-        id: userId,
-        role,
-        qualification: role === "consultant" ? qualification : null,
-        memberships: role === "consultant" ? memberships : [],
-        member_number: role === "consultant" && memberships.includes("TOTORU Membership Member") ? memberNumber.trim() : null,
-        declarations_agreed: role === "consultant" ? declarationsAgreed : false,
-      });
-      if (profileError) throw profileError;
+      // Best-effort immediate insert (works if the session is active; if email
+      // confirmation is required this may be blocked and is created on first login instead).
+      await supabase.from("profiles").insert({ id: userId, ...profileData });
 
       setSuccess("Account created! Check your email to confirm, then log in.");
       setMode("login");

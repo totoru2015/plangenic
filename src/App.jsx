@@ -371,8 +371,24 @@ export default function App() {
   });
 
   async function loadProfile(userId) {
-    const { data } = await supabase.from("profiles").select("*").eq("id", userId).single();
-    if (data) setUserProfile(data);
+    const { data } = await supabase.from("profiles").select("*").eq("id", userId).maybeSingle();
+    if (data) { setUserProfile(data); return; }
+    // No profile yet (e.g. it couldn't be saved at sign-up before email confirmation).
+    // Create it now from the metadata captured at sign-up — the user is authenticated here.
+    const { data: { user: authUser } } = await supabase.auth.getUser();
+    const meta = authUser?.user_metadata || {};
+    if (meta.role) {
+      const row = {
+        id: userId,
+        role: meta.role,
+        qualification: meta.qualification ?? null,
+        memberships: meta.memberships ?? [],
+        member_number: meta.member_number ?? null,
+        declarations_agreed: meta.declarations_agreed ?? false,
+      };
+      const { data: created } = await supabase.from("profiles").upsert(row).select("*").maybeSingle();
+      if (created) setUserProfile(created);
+    }
   }
 
   // Listen for auth state changes
@@ -427,6 +443,7 @@ export default function App() {
     const { data, error } = await supabase
       .from("plans")
       .select("id, title, doc_type, created_at")
+      .eq("user_id", user.id)
       .order("created_at", { ascending: false });
     setPlansLoading(false);
     if (error) setPlansError("Couldn't load your plans — " + error.message);
@@ -521,6 +538,7 @@ export default function App() {
   // Execution tracking (status per KPI / milestone / goal, persisted on the saved plan)
   const [currentPlanId, setCurrentPlanId] = useState(null);
   const [tracking, setTracking] = useState({});
+  const [restored, setRestored] = useState(false);
 
   async function setItemStatus(key, status) {
     const next = { ...tracking, [key]: status };
@@ -529,6 +547,31 @@ export default function App() {
       await supabase.from("plans").update({ tracking: next }).eq("id", currentPlanId);
     }
   }
+
+  // Restore the last-generated plan on load so a refresh doesn't lose it
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("plangenic_current") || "null");
+      if (saved && saved.plan) {
+        setPlan(saved.plan); setPlanType(saved.planType || "strategic");
+        setPlanFw(saved.planFw || []); setFwReasons(saved.fwReasons || {}); setFwRationale(saved.fwRationale || "");
+        setVersions(saved.versions || {}); setFinModel(saved.finModel || null);
+        setTracking(saved.tracking || {}); setCurrentPlanId(saved.currentPlanId || null);
+        setMarketSources(saved.marketSources || []);
+        if (saved.org) setF((p) => ({ ...p, org: saved.org }));
+      }
+    } catch (_) {}
+    setRestored(true);
+  }, []);
+
+  // Persist the current plan whenever it changes
+  useEffect(() => {
+    if (!restored) return;
+    try {
+      if (plan) localStorage.setItem("plangenic_current", JSON.stringify({ plan, planType, planFw, fwReasons, fwRationale, versions, finModel, tracking, currentPlanId, marketSources, org: f.org }));
+      else localStorage.removeItem("plangenic_current");
+    } catch (_) {}
+  }, [plan, planType, planFw, fwReasons, fwRationale, versions, finModel, tracking, currentPlanId, marketSources]);
 
   // Health check state
   const [uploadedFile, setUploadedFile] = useState(null);
@@ -1867,7 +1910,7 @@ function MyPlansModal({ plans, loading, error, onClose, onOpen, onDelete }) {
                 </div>
                 <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
                   <button onClick={() => onOpen(p.id)} style={{ cursor: "pointer", border: "none", background: `linear-gradient(145deg, ${C.accent2}, ${C.accent})`, color: "#fff", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 600 }}>Open</button>
-                  <button onClick={() => { if (window.confirm("Delete this saved plan? This can't be undone.")) onDelete(p.id); }} style={{ cursor: "pointer", border: `1px solid ${C.line}`, background: "transparent", color: C.muted, borderRadius: 8, padding: "8px 12px", fontSize: 13 }}>Delete</button>
+                  <button onClick={() => { if (window.confirm(`Delete "${p.title}"?\n\n(Once a business or strategic plan is deleted it cannot be restored — please consider before deleting.)`)) onDelete(p.id); }} style={{ cursor: "pointer", border: `1px solid ${C.line}`, background: "transparent", color: C.muted, borderRadius: 8, padding: "8px 12px", fontSize: 13 }}>Delete</button>
                 </div>
               </div>
             ))
@@ -1923,33 +1966,47 @@ function TemplatesModal({ onClose, onPick }) {
 
 /* ---------- Collaboration: share link + comments (owner side) ---------- */
 function ShareComments({ planId, user, onSave }) {
-  const [isShared, setIsShared] = useState(false);
-  const [token, setToken] = useState(null);
+  const [collaborators, setCollaborators] = useState([]);
+  const [inviteEmail, setInviteEmail] = useState("");
   const [comments, setComments] = useState([]);
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [msg, setMsg] = useState("");
 
   useEffect(() => {
     if (!planId) return;
-    (async () => {
-      const { data } = await supabase.from("plans").select("is_shared, share_token").eq("id", planId).single();
-      if (data) { setIsShared(!!data.is_shared); setToken(data.share_token); }
-      loadComments();
-    })();
+    loadCollaborators();
+    loadComments();
     // eslint-disable-next-line
   }, [planId]);
+
+  async function loadCollaborators() {
+    const { data } = await supabase.from("plan_collaborators").select("id, email").eq("plan_id", planId).order("created_at", { ascending: true });
+    setCollaborators(data || []);
+  }
 
   async function loadComments() {
     const { data } = await supabase.from("plan_comments").select("*").eq("plan_id", planId).order("created_at", { ascending: true });
     setComments(data || []);
   }
 
-  async function toggleShare() {
+  async function invite() {
+    const email = inviteEmail.trim().toLowerCase();
+    setMsg("");
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setMsg("Please enter a valid email address."); return; }
+    if (email === (user?.email || "").toLowerCase()) { setMsg("That's your own email — you already have access."); return; }
+    if (collaborators.some((c) => c.email === email)) { setMsg("That person is already invited."); return; }
     setBusy(true);
-    const next = !isShared;
-    await supabase.from("plans").update({ is_shared: next }).eq("id", planId);
-    setIsShared(next); setBusy(false);
+    const { error } = await supabase.from("plan_collaborators").insert({ plan_id: planId, email });
+    setBusy(false);
+    if (error) { setMsg("Couldn't add — " + error.message); return; }
+    setInviteEmail(""); loadCollaborators();
+  }
+
+  async function removeCollaborator(id) {
+    await supabase.from("plan_collaborators").delete().eq("id", id);
+    loadCollaborators();
   }
 
   async function addComment() {
@@ -1959,7 +2016,7 @@ function ShareComments({ planId, user, onSave }) {
     setBody(""); await loadComments(); setBusy(false);
   }
 
-  const shareUrl = token ? `${window.location.origin}${window.location.pathname}?share=${token}` : "";
+  const shareUrl = `${window.location.origin}${window.location.pathname}?share=${planId}`;
   const copyLink = () => { navigator.clipboard?.writeText(shareUrl); setCopied(true); setTimeout(() => setCopied(false), 2500); };
 
   if (!planId) {
@@ -1969,7 +2026,7 @@ function ShareComments({ planId, user, onSave }) {
           <Users size={18} color={C.accent2} />
           <h2 style={{ fontFamily: "'Fraunces',serif", fontSize: 21, fontWeight: 600, margin: 0, color: C.ink }}>Share &amp; collaborate</h2>
         </div>
-        <p style={{ color: C.muted, fontSize: 13.5, marginTop: 0, marginBottom: 14 }}>Save this plan first, then you can share a view link and collect comments from your team.</p>
+        <p style={{ color: C.muted, fontSize: 13.5, marginTop: 0, marginBottom: 14 }}>Save this plan first, then you can invite specific people by email to view it and leave comments.</p>
         <button onClick={onSave} style={{ cursor: "pointer", border: `1px solid ${C.accent2}`, background: "transparent", color: C.accent2, borderRadius: 8, padding: "9px 14px", fontSize: 13.5, fontWeight: 600, display: "flex", alignItems: "center", gap: 7 }}><Save size={15} /> Save plan to enable sharing</button>
       </section>
     );
@@ -1981,19 +2038,36 @@ function ShareComments({ planId, user, onSave }) {
         <Users size={18} color={C.accent2} />
         <h2 style={{ fontFamily: "'Fraunces',serif", fontSize: 21, fontWeight: 600, margin: 0, color: C.ink }}>Share &amp; collaborate</h2>
       </div>
-      <p style={{ color: C.muted, fontSize: 13, marginTop: 0, marginBottom: 16 }}>Share a read-only link so team members or a consultant can view this plan and leave comments.</p>
+      <p style={{ color: C.muted, fontSize: 13, marginTop: 0, marginBottom: 16 }}>This plan is private. Invite specific people by email — only the people you name (signed in with that email) can view it and comment. Nobody else can access it.</p>
 
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
-        <button onClick={toggleShare} disabled={busy} style={{ cursor: busy ? "wait" : "pointer", border: "none", background: isShared ? "#e7f5f0" : `linear-gradient(145deg, ${C.accent2}, ${C.accent})`, color: isShared ? "#1d5c4e" : "#fff", borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 600, display: "flex", alignItems: "center", gap: 8 }}>
-          {isShared ? <><CheckCircle size={15} /> Sharing is on</> : <><Users size={15} /> Turn on sharing</>}
-        </button>
-        {isShared && <span style={{ fontSize: 12.5, color: C.muted }}>Anyone with the link can view (not edit).</span>}
+      {/* Invite by email */}
+      <Sub>Invite collaborators by email</Sub>
+      <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+        <input value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") invite(); }} placeholder="name@example.com" style={{ ...inputStyle, flex: 1, minWidth: 220 }} />
+        <button onClick={invite} disabled={busy} style={{ cursor: busy ? "wait" : "pointer", border: "none", background: `linear-gradient(145deg, ${C.accent2}, ${C.accent})`, color: "#fff", borderRadius: 8, padding: "0 18px", fontSize: 13.5, fontWeight: 600 }}>Invite</button>
       </div>
+      {msg && <div style={{ fontSize: 12.5, color: "#9a3412", marginBottom: 8 }}>{msg}</div>}
 
-      {isShared && (
-        <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap" }}>
-          <input readOnly value={shareUrl} onClick={(e) => e.target.select()} style={{ ...inputStyle, flex: 1, minWidth: 220, fontSize: 12.5 }} />
-          <button onClick={copyLink} style={{ cursor: "pointer", border: `1px solid ${C.line}`, background: C.paper, color: C.ink, borderRadius: 8, padding: "0 16px", fontSize: 13, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy link"}</button>
+      {collaborators.length > 0 ? (
+        <div style={{ marginBottom: 16 }}>
+          {collaborators.map((c) => (
+            <div key={c.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "8px 0", borderBottom: `1px solid ${C.line}` }}>
+              <span style={{ fontSize: 13.5, color: C.ink, display: "flex", alignItems: "center", gap: 7 }}><User size={13} color={C.accent2} /> {c.email}</span>
+              <button onClick={() => removeCollaborator(c.id)} style={{ cursor: "pointer", border: "none", background: "transparent", color: C.muted, fontSize: 12.5, fontWeight: 600 }}>Remove</button>
+            </div>
+          ))}
+        </div>
+      ) : <p style={{ color: C.muted, fontSize: 12.5, margin: "0 0 16px" }}>No collaborators yet — this plan is visible only to you.</p>}
+
+      {/* Share link (only useful to invited people) */}
+      {collaborators.length > 0 && (
+        <div style={{ marginBottom: 20 }}>
+          <Sub>Link for invited people</Sub>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <input readOnly value={shareUrl} onClick={(e) => e.target.select()} style={{ ...inputStyle, flex: 1, minWidth: 220, fontSize: 12.5 }} />
+            <button onClick={copyLink} style={{ cursor: "pointer", border: `1px solid ${C.line}`, background: C.paper, color: C.ink, borderRadius: 8, padding: "0 16px", fontSize: 13, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy link"}</button>
+          </div>
+          <div style={{ fontSize: 12, color: C.muted, marginTop: 6 }}>The link only works for the invited people above, signed in with their invited email.</div>
         </div>
       )}
 
@@ -2029,11 +2103,12 @@ function SharedPlanView({ token, user }) {
 
   useEffect(() => {
     (async () => {
+      // token here is the plan id. RLS only returns the row if the signed-in
+      // user is the owner or an invited collaborator (matched by their email).
       const { data, error } = await supabase
         .from("plans")
         .select("id, title, doc_type, content")
-        .eq("share_token", token)
-        .eq("is_shared", true)
+        .eq("id", token)
         .maybeSingle();
       if (error || !data) { setState("notfound"); return; }
       setPlanRow(data); setState("ok");
@@ -2063,8 +2138,8 @@ function SharedPlanView({ token, user }) {
   if (state === "notfound") return wrap(
     <div style={{ background: C.card, borderRadius: 14, padding: 30, textAlign: "center" }}>
       <AlertCircle size={28} color="#9a3412" style={{ marginBottom: 10 }} />
-      <div style={{ fontFamily: "'Fraunces',serif", fontSize: 20, fontWeight: 600, marginBottom: 6 }}>Plan not available</div>
-      <p style={{ color: C.muted, fontSize: 14 }}>This shared link is invalid or sharing has been turned off. <a href={window.location.pathname} style={{ color: C.accent2, fontWeight: 600 }}>Go to Plangenic</a></p>
+      <div style={{ fontFamily: "'Fraunces',serif", fontSize: 20, fontWeight: 600, marginBottom: 6 }}>You don't have access to this plan</div>
+      <p style={{ color: C.muted, fontSize: 14 }}>This plan is private. You can only view it if the owner has invited your email address, and you're signed in with that email. <a href={window.location.pathname} style={{ color: C.accent2, fontWeight: 600 }}>Go to Plangenic</a></p>
     </div>
   );
 
@@ -2159,9 +2234,13 @@ function ExecutionTracking({ plan, tracking, onSetStatus, saved, onSave }) {
       </div>
 
       {!saved && (
-        <div style={{ marginBottom: 16 }}>
-          <button onClick={onSave} style={{ cursor: "pointer", border: `1px solid ${C.accent2}`, background: "transparent", color: C.accent2, borderRadius: 8, padding: "9px 14px", fontSize: 13.5, fontWeight: 600, display: "flex", alignItems: "center", gap: 7 }}>
-            <Save size={15} /> Save plan to keep progress
+        <div style={{ marginBottom: 16, padding: "12px 14px", background: "#fdf3e0", border: "1px solid #f0d9a8", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 9, fontSize: 13, color: "#9a6a00" }}>
+            <AlertTriangle size={17} style={{ flexShrink: 0 }} />
+            <span>This plan isn't saved yet — your progress won't be kept until you save it.</span>
+          </div>
+          <button onClick={onSave} style={{ cursor: "pointer", border: "none", background: `linear-gradient(145deg, ${C.accent2}, ${C.accent})`, color: "#fff", borderRadius: 8, padding: "9px 15px", fontSize: 13.5, fontWeight: 600, display: "flex", alignItems: "center", gap: 7, whiteSpace: "nowrap" }}>
+            <Save size={15} /> Save plan
           </button>
         </div>
       )}
