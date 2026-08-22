@@ -23,7 +23,7 @@ function addTitleSlide(pptx, org, subtitle, tagline) {
   s.addText(org || "Untitled", { x: 0.65, y: 1.9, w: 8.6, h: 1.2, fontSize: 44, color: WHITE, bold: true });
   if (tagline) s.addText(tagline, { x: 0.7, y: 3.1, w: 8.5, h: 0.6, fontSize: 18, color: MUTED, italic: true });
   const today = new Date().toLocaleDateString(undefined, { month: "long", year: "numeric" });
-  s.addText(`${today}  ·  Prepared with Plangenic`, { x: 0.7, y: 4.9, w: 8.5, h: 0.4, fontSize: 12, color: MUTED });
+  s.addText(`${today}  ·  Prepared with Strataplan`, { x: 0.7, y: 4.9, w: 8.5, h: 0.4, fontSize: 12, color: MUTED });
 }
 
 function addContentSlide(pptx, title, bullets, opts = {}) {
